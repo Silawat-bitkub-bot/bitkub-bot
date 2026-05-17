@@ -1,9 +1,15 @@
 """
-Bitkub Adaptive Bot — Multi-Strategy + Market Regime Detection
-กลยุทธ์ปรับเองตามสภาพตลาดอัตโนมัติ
+Bitkub Adaptive Bot V2
+- Multi-coin (BTC, ETH, KUB)
+- RSI Alert เมื่อใกล้จุดซื้อ
+- Weekly Backtest อัตโนมัติทุกวันจันทร์
+- Market Regime Detection (Daily)
+- Adaptive Strategy (RSI/MA)
+- Trailing Stop + Hard Stop
+- Telegram Commands
 """
 import os, time, hmac, hashlib, requests, json, threading, math
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,44 +21,52 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE_URL         = "https://api.bitkub.com"
 
 # ========== ตั้งค่าหลัก ==========
-SYMBOL            = "THB_BTC"
-POSITION_PCT      = 0.10        # 10% ของพอร์ตต่อ trade
-STOP_LOSS_PCT     = 0.05        # Hard Stop Loss 5%
-TRAILING_STOP_PCT = 0.03        # Trailing Stop 3%
-MIN_ORDER_THB     = 50
+COINS = [
+    {"symbol": "THB_BTC", "name": "BTC", "min_order": 50},
+    {"symbol": "THB_ETH", "name": "ETH", "min_order": 50},
+]
+POSITION_PCT      = 0.10        # 10% ต่อเหรียญ (BTC+ETH = 20% รวม)
+STOP_LOSS_PCT     = 0.05
+TRAILING_STOP_PCT = 0.03
 MAX_RETRIES       = 3
 
 # ความถี่
-SCAN_INTERVAL     = 300         # ตรวจสัญญาณทุก 5 นาที
+SCAN_INTERVAL     = 300         # ตรวจทุก 5 นาที
 REGIME_INTERVAL   = 14400       # วิเคราะห์ตลาดทุก 4 ชั่วโมง
-TRADE_COOLDOWN    = 14400       # รอ 4 ชั่วโมงระหว่าง trade
+TRADE_COOLDOWN    = 14400       # cooldown 4 ชั่วโมงต่อเหรียญ
 
-# RSI Strategy
+# RSI
 RSI_PERIOD        = 14
 RSI_OVERSOLD      = 30
 RSI_OVERBOUGHT    = 70
-RSI_RESOLUTION    = "60"        # กราฟ 1 ชั่วโมง
+RSI_ALERT         = 35          # แจ้งเตือนก่อนถึงจุดซื้อ
+RSI_RESOLUTION    = "60"
 
-# MA Strategy
+# MA
 MA_FAST           = 12
 MA_SLOW           = 26
-MA_RESOLUTION     = "240"       # กราฟ 4 ชั่วโมง
+MA_RESOLUTION     = "240"
 
-# Regime Detection (กราฟรายวัน)
+# Regime
 ADX_PERIOD        = 14
 ADX_THRESHOLD     = 25
-BB_PERIOD         = 20
 BB_SQUEEZE_PCT    = 0.05
 WEEKLY_RANGE_PCT  = 0.08
 REGIME_SCORE_MIN  = 2
 # =================================
 
-# ========== State ==========
-entry_price       = None
-peak_price        = None
+# ========== Global State ==========
+positions = {c["name"]: {
+    "entry_price": None,
+    "peak_price":  None,
+    "last_trade":  0,
+    "prev_signal": None,
+    "alerted":     False,   # ป้องกันแจ้งซ้ำ
+} for c in COINS}
+
+bot_running       = True
 is_paused         = False
 pause_until       = None
-bot_running       = True
 trade_count       = 0
 win_count         = 0
 total_pnl         = 0.0
@@ -61,9 +75,9 @@ last_update_id    = 0
 current_regime    = "UNKNOWN"
 current_strategy  = "NONE"
 last_regime_check = 0
-last_trade_time   = 0
 regime_details    = {}
-# ===========================
+last_backtest_day = -1          # วันอาทิตย์ที่รัน backtest ล่าสุด
+# ==================================
 
 
 def log(msg):
@@ -110,14 +124,16 @@ def process_commands():
                 text    = msg.get("text", "").strip().lower()
                 if chat_id != TELEGRAM_CHAT_ID: continue
                 cmds = {
-                    "/status":   handle_status,
-                    "/balance":  handle_balance,
-                    "/stop":     handle_stop,
-                    "/start":    handle_start,
-                    "/pnl":      handle_pnl,
-                    "/regime":   handle_regime,
-                    "/strategy": handle_strategy,
-                    "/help":     handle_help,
+                    "/status":    handle_status,
+                    "/balance":   handle_balance,
+                    "/stop":      handle_stop,
+                    "/start":     handle_start,
+                    "/pnl":       handle_pnl,
+                    "/regime":    handle_regime,
+                    "/strategy":  handle_strategy,
+                    "/positions": handle_positions,
+                    "/backtest":  lambda: threading.Thread(target=run_weekly_backtest, args=(True,), daemon=True).start(),
+                    "/help":      handle_help,
                 }
                 if text in cmds: cmds[text]()
                 elif text.startswith("/pause"): handle_pause(text)
@@ -128,39 +144,33 @@ def process_commands():
 # ==================== Handlers ====================
 
 def handle_status():
-    status = "⏸️ หยุดชั่วคราว" if is_paused else "🟢 กำลังทำงาน"
-    pause_text = ""
-    if is_paused and pause_until:
-        pause_text = f"\nเริ่มใหม่ใน: {max(0,int((pause_until-time.time())/60))} นาที"
+    status     = "⏸️ หยุดชั่วคราว" if is_paused else "🟢 กำลังทำงาน"
+    regime_icon = {"SIDEWAY": "📊", "TRENDING": "📈", "VOLATILE": "⚡"}.get(current_regime, "❓")
+    strat_icon  = {"RSI": "RSI14", "MA": "MA12/26", "NONE": "รอ"}.get(current_strategy, "—")
 
-    strat_icon = {"RSI": "📊 RSI (Sideway)", "MA": "📈 MA Crossover (Trending)", "NONE": "⛔ รอสัญญาณ"}.get(current_strategy, "❓")
-    regime_icon = {"SIDEWAY": "📊 Sideway", "TRENDING": "📈 Trending", "VOLATILE": "⚡ Volatile"}.get(current_regime, "❓")
+    pos_lines = []
+    for coin in [c["name"] for c in COINS]:
+        p = positions[coin]
+        if p["entry_price"]:
+            try:
+                _, _, closes = get_candles(f"THB_{coin}", RSI_RESOLUTION, 5)
+                cur  = closes[-1] if closes else 0
+                pct  = (cur - p["entry_price"]) / p["entry_price"] * 100
+                pos_lines.append(f"  {coin}: {p['entry_price']:,.0f} → {cur:,.0f} ({pct:+.2f}%)")
+            except:
+                pos_lines.append(f"  {coin}: {p['entry_price']:,.0f}")
 
-    pos = "ไม่มี"
-    if entry_price:
-        try:
-            closes = get_candles(SYMBOL, "60", 5)
-            cur    = closes[-1] if closes else 0
-            pct    = (cur - entry_price) / entry_price * 100
-            pos    = f"{SYMBOL.split('_')[1]} ที่ {entry_price:,.0f} ({pct:+.2f}%)"
-        except: pos = f"{SYMBOL.split('_')[1]} ที่ {entry_price:,.0f}"
+    pos_text  = "\n".join(pos_lines) if pos_lines else "  ไม่มี"
+    wr        = win_count / trade_count * 100 if trade_count > 0 else 0
+    uptime    = str(datetime.now() - start_time).split(".")[0]
 
-    cooldown_text = ""
-    if last_trade_time:
-        remaining = max(0, TRADE_COOLDOWN - (time.time() - last_trade_time))
-        if remaining > 0:
-            cooldown_text = f"\nCooldown: อีก {int(remaining/60)} นาที"
-
-    wr = win_count / trade_count * 100 if trade_count > 0 else 0
     send_telegram(
         f"📊 <b>สถานะ Bot</b>\n{'─'*25}\n"
-        f"สถานะ: {status}{pause_text}\n"
-        f"ตลาด: {regime_icon}\n"
-        f"กลยุทธ์: {strat_icon}\n"
-        f"Position: {pos}\n"
-        f"Trade: {trade_count} ครั้ง | Win: {wr:.0f}%\n"
-        f"กำไร/ขาดทุน: {total_pnl:+.2f} บาท{cooldown_text}\n"
-        f"รันมาแล้ว: {str(datetime.now()-start_time).split('.')[0]}"
+        f"สถานะ: {status}\n"
+        f"ตลาด: {regime_icon} {current_regime} | กลยุทธ์: {strat_icon}\n"
+        f"Positions:\n{pos_text}\n"
+        f"Trade: {trade_count} | Win: {wr:.0f}% | PnL: {total_pnl:+.2f} บาท\n"
+        f"รันมาแล้ว: {uptime}"
     )
 
 
@@ -169,12 +179,10 @@ def handle_balance():
     if not b: send_telegram("❌ ดึงยอดเงินไม่ได้"); return
     def v(k):
         x = b.get(k, {}); return float(x.get("available", 0)) if isinstance(x, dict) else float(x)
-    send_telegram(
-        f"💰 <b>ยอดเงินในกระเป๋า</b>\n{'─'*25}\n"
-        f"💵 THB: {v('THB'):>12,.2f} บาท\n"
-        f"₿  BTC: {v('BTC'):>16.8f}\n"
-        f"Ξ  ETH: {v('ETH'):>16.8f}"
-    )
+    lines = [f"💵 THB: {v('THB'):>12,.2f} บาท"]
+    for c in COINS:
+        lines.append(f"   {c['name']}: {v(c['name']):>16.6f}")
+    send_telegram(f"💰 <b>ยอดเงินในกระเป๋า</b>\n{'─'*25}\n" + "\n".join(lines))
 
 
 def handle_stop():
@@ -200,53 +208,76 @@ def handle_pause(text):
     except: send_telegram("❌ ใช้: /pause 4h หรือ /pause 30m")
 
 
-def handle_regime():
-    d = regime_details
-    send_telegram(
-        f"🔍 <b>สภาพตลาดปัจจุบัน: {current_regime}</b>\n{'─'*25}\n"
-        f"ADX: {d.get('adx','—')} {'✅' if d.get('adx_ok') else '❌'}\n"
-        f"BB Width: {d.get('bb','—')} {'✅' if d.get('bb_ok') else '❌'}\n"
-        f"Weekly Range: {d.get('wr','—')} {'✅' if d.get('wr_ok') else '❌'}\n"
-        f"Score: {d.get('score',0)}/3\n\n"
-        f"กลยุทธ์ที่ใช้: <b>{current_strategy}</b>"
-    )
-
-
-def handle_strategy():
-    strats = {
-        "RSI":  "📊 RSI14 (1H) — ซื้อ Oversold, ขาย Overbought\nเหมาะกับ: ตลาด Sideway",
-        "MA":   "📈 MA12/26 (4H) — ซื้อตอน MA ตัดขึ้น\nเหมาะกับ: ตลาด Trending",
-        "NONE": "⛔ รอสัญญาณ — ตลาด Volatile หรือไม่ชัดเจน"
-    }
-    send_telegram(f"🧠 <b>กลยุทธ์ปัจจุบัน</b>\n{'─'*25}\n{strats.get(current_strategy, '—')}")
-
-
 def handle_pnl():
     if trade_count == 0: send_telegram("📈 <b>ยังไม่มี Trade</b>"); return
     wr = win_count / trade_count * 100
     send_telegram(
         f"📈 <b>สรุปกำไร/ขาดทุน</b>\n{'─'*25}\n"
-        f"Trade ทั้งหมด: {trade_count} ครั้ง\n"
-        f"Win Rate: {wr:.1f}%\n"
+        f"Trade: {trade_count} ครั้ง | Win Rate: {wr:.1f}%\n"
         f"กำไร/ขาดทุนรวม: {total_pnl:+.2f} บาท\n"
         f"เฉลี่ยต่อ trade: {total_pnl/trade_count:+.2f} บาท"
     )
+
+
+def handle_regime():
+    d = regime_details
+    send_telegram(
+        f"🔍 <b>สภาพตลาด: {current_regime}</b>\n{'─'*25}\n"
+        f"ADX: {d.get('adx','—')} {'✅' if d.get('adx_ok') else '❌'}\n"
+        f"BB Width: {d.get('bb','—')} {'✅' if d.get('bb_ok') else '❌'}\n"
+        f"Weekly Range: {d.get('wr','—')} {'✅' if d.get('wr_ok') else '❌'}\n"
+        f"Score: {d.get('score',0)}/3\n"
+        f"กลยุทธ์ที่ใช้: <b>{current_strategy}</b>"
+    )
+
+
+def handle_strategy():
+    desc = {
+        "RSI":  "RSI14 (1H) — ซื้อ RSI &lt; 30, ขาย RSI &gt; 70\nเหมาะกับ: Sideway",
+        "MA":   "MA12/26 (4H) — ซื้อตาม Trend\nเหมาะกับ: Trending",
+        "NONE": "รอ — ตลาด Volatile หรือไม่ชัดเจน"
+    }
+    send_telegram(f"🧠 <b>กลยุทธ์ปัจจุบัน</b>\n{'─'*25}\n{desc.get(current_strategy,'—')}")
+
+
+def handle_positions():
+    lines = []
+    for c in COINS:
+        p = positions[c["name"]]
+        if p["entry_price"]:
+            try:
+                _, _, closes = get_candles(f"THB_{c['name']}", RSI_RESOLUTION, 5)
+                cur  = closes[-1] if closes else 0
+                pct  = (cur - p["entry_price"]) / p["entry_price"] * 100
+                trail_pct = (cur - p["peak_price"]) / p["peak_price"] * 100 if p["peak_price"] else 0
+                lines.append(
+                    f"₿ <b>{c['name']}</b>\n"
+                    f"  ซื้อที่: {p['entry_price']:,.0f} | ปัจจุบัน: {cur:,.0f}\n"
+                    f"  P&L: {pct:+.2f}% | Trail: {trail_pct:.2f}%"
+                )
+            except:
+                lines.append(f"₿ <b>{c['name']}</b>: {p['entry_price']:,.0f} บาท")
+    if not lines:
+        send_telegram("📋 <b>Positions</b>\nไม่มี position ที่เปิดอยู่")
+    else:
+        send_telegram(f"📋 <b>Positions ที่เปิดอยู่</b>\n{'─'*25}\n" + "\n\n".join(lines))
 
 
 def handle_help():
     send_telegram(
         "📋 <b>คำสั่งที่ใช้ได้</b>\n"
         "─────────────────────\n"
-        "/status    — สถานะ Bot\n"
-        "/balance   — ยอดเงิน\n"
-        "/pnl       — กำไร/ขาดทุน\n"
-        "/regime    — สภาพตลาด\n"
-        "/strategy  — กลยุทธ์ที่ใช้อยู่\n"
-        "/stop      — หยุดเทรด\n"
-        "/start     — เริ่มเทรด\n"
-        "/pause 4h  — หยุดพัก 4 ชั่วโมง\n"
-        "/pause 30m — หยุดพัก 30 นาที\n"
-        "/help      — คำสั่งทั้งหมด"
+        "/status     — สถานะ Bot\n"
+        "/balance    — ยอดเงิน\n"
+        "/positions  — Positions ที่เปิดอยู่\n"
+        "/pnl        — กำไร/ขาดทุน\n"
+        "/regime     — สภาพตลาด\n"
+        "/strategy   — กลยุทธ์ที่ใช้\n"
+        "/backtest   — รัน Backtest ตอนนี้เลย\n"
+        "/stop       — หยุดเทรด\n"
+        "/start      — เริ่มเทรด\n"
+        "/pause 4h   — หยุดพัก\n"
+        "/help       — คำสั่งทั้งหมด"
     )
 
 
@@ -255,7 +286,7 @@ def handle_help():
 def api_request(method, path, body=None):
     body_str  = json.dumps(body, separators=(',', ':')) if body else ""
     ts        = str(int(time.time() * 1000))
-    sig       = hmac.new(API_SECRET.encode(), (ts+method.upper()+path+body_str).encode(), hashlib.sha256).hexdigest()
+    sig       = hmac.new(API_SECRET.encode(), (ts+method+path+body_str).encode(), hashlib.sha256).hexdigest()
     headers   = {"Content-Type": "application/json", "X-BTK-APIKEY": API_KEY, "X-BTK-TIMESTAMP": ts, "X-BTK-SIGN": sig}
     for i in range(MAX_RETRIES):
         try:
@@ -263,11 +294,10 @@ def api_request(method, path, body=None):
             res = fn(f"{BASE_URL}{path}", headers=headers, data=body_str, timeout=10)
             return res.json()
         except requests.exceptions.ConnectionError:
-            log(f"⚠️ Connection error ({i+1}/{MAX_RETRIES})")
             if i < MAX_RETRIES - 1: time.sleep(5*(i+1))
-        except Exception as e:
+        except:
             if i < MAX_RETRIES - 1: time.sleep(3)
-    send_telegram("🔴 <b>API ไม่ตอบสนอง!</b> ตรวจสอบ internet")
+    send_telegram("🔴 <b>API ไม่ตอบสนอง!</b>")
     return {}
 
 
@@ -281,7 +311,9 @@ def get_candles(symbol, resolution="60", limit=60):
             "symbol": sym.upper(), "resolution": resolution,
             "from": end - limit*mult, "to": end
         }, timeout=10).json()
-        return (r.get("h",[]), r.get("l",[]), r.get("c",[])) if r.get("s")=="ok" else ([],[],[])
+        if r.get("s") == "ok":
+            return r.get("h",[]), r.get("l",[]), r.get("c",[])
+        return [], [], []
     except: return [], [], []
 
 
@@ -290,93 +322,67 @@ def get_balances():
     return d.get("result", {}) if d.get("error") == 0 else {}
 
 
-def get_thb():
-    v = get_balances().get("THB", {}); return float(v.get("available",0)) if isinstance(v,dict) else float(v)
+def place_order(side, symbol, amount):
+    coin = symbol.split("_")[1].lower()
+    path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
+    return api_request("POST", path, {"sym": f"{coin}_thb", "amt": amount, "rat": 0, "typ": "market"})
 
 
-def get_coin():
-    coin = SYMBOL.split("_")[1]; v = get_balances().get(coin, {})
-    return float(v.get("available",0)) if isinstance(v,dict) else float(v)
+def get_coin_balance(coin_name):
+    b = get_balances(); v = b.get(coin_name, {})
+    return float(v.get("available", 0)) if isinstance(v, dict) else float(v)
 
 
-def place_order(side, amount):
-    coin = SYMBOL.split("_")[1].lower()
-    path = "/api/v3/market/place-bid" if side=="buy" else "/api/v3/market/place-ask"
-    return api_request("POST", path, {"sym":f"{coin}_thb","amt":amount,"rat":0,"typ":"market"})
-
-
-def do_sell(coin_bal, price, reason):
-    global entry_price, peak_price, trade_count, win_count, total_pnl, last_trade_time
-    r = place_order("sell", coin_bal)
-    if r.get("error") == 0:
-        pnl        = (price - entry_price) / entry_price * (coin_bal * entry_price) if entry_price else 0
-        total_pnl += pnl
-        trade_count += 1
-        if pnl > 0: win_count += 1
-        last_trade_time = time.time()
-        log(f"✅ {reason} | {pnl:+.2f} บาท")
-        send_telegram(
-            f"{'🚨' if 'Stop' in reason else '🔴'} <b>{reason}</b>\n"
-            f"กลยุทธ์: {current_strategy}\n"
-            f"ราคาซื้อ: {entry_price:,.0f} | ราคาขาย: {price:,.0f}\n"
-            f"{'📈' if pnl>=0 else '📉'} กำไร/ขาดทุน: {pnl:+.2f} บาท\n"
-            f"รวม: {total_pnl:+.2f} บาท"
-        )
-        entry_price = peak_price = None
-        return True
-    send_telegram(f"❌ <b>ขายไม่สำเร็จ</b>\n{r}")
-    return False
+def get_thb_balance():
+    b = get_balances(); v = b.get("THB", {})
+    return float(v.get("available", 0)) if isinstance(v, dict) else float(v)
 
 
 # ==================== Indicators ====================
 
 def calc_rsi(closes, period=14):
     if len(closes) < period+1: return None
-    gains  = [max(closes[i]-closes[i-1],0) for i in range(-period,0)]
-    losses = [max(closes[i-1]-closes[i],0) for i in range(-period,0)]
-    ag,al  = sum(gains)/period, sum(losses)/period
-    return round(100-(100/(1+ag/al)),2) if al!=0 else 100
+    gains  = [max(closes[i]-closes[i-1], 0) for i in range(-period, 0)]
+    losses = [max(closes[i-1]-closes[i], 0) for i in range(-period, 0)]
+    ag, al = sum(gains)/period, sum(losses)/period
+    return round(100-(100/(1+ag/al)), 2) if al != 0 else 100
 
 
 def calc_ma(closes, period):
-    return sum(closes[-period:])/period if len(closes)>=period else None
+    return sum(closes[-period:])/period if len(closes) >= period else None
 
 
 def calc_adx(highs, lows, closes, period=14):
     if len(closes) < period*2: return None
-    tr_l,pdm_l,ndm_l = [],[],[]
+    tr_l, pdm_l, ndm_l = [], [], []
     for i in range(1, len(closes)):
-        h,l,pc = highs[i],lows[i],closes[i-1]
+        h, l, pc = highs[i], lows[i], closes[i-1]
         tr_l.append(max(h-l, abs(h-pc), abs(l-pc)))
-        pdm_l.append(max(h-highs[i-1],0) if (h-highs[i-1])>(lows[i-1]-l) else 0)
-        ndm_l.append(max(lows[i-1]-l,0) if (lows[i-1]-l)>(h-highs[i-1]) else 0)
-
+        pdm_l.append(max(h-highs[i-1], 0) if (h-highs[i-1]) > (lows[i-1]-l) else 0)
+        ndm_l.append(max(lows[i-1]-l, 0) if (lows[i-1]-l) > (h-highs[i-1]) else 0)
     def smooth(data, p):
         s = sum(data[:p]); res = [s]
-        for v in data[p:]: s=s-s/p+v; res.append(s)
+        for v in data[p:]: s = s-s/p+v; res.append(s)
         return res
-
-    atr,pdm_s,ndm_s = smooth(tr_l,period), smooth(pdm_l,period), smooth(ndm_l,period)
+    atr, pdm_s, ndm_s = smooth(tr_l, period), smooth(pdm_l, period), smooth(ndm_l, period)
     dx_l = []
     for i in range(len(atr)):
         pdi = 100*pdm_s[i]/atr[i] if atr[i] else 0
         ndi = 100*ndm_s[i]/atr[i] if atr[i] else 0
         dx_l.append(100*abs(pdi-ndi)/(pdi+ndi) if (pdi+ndi) else 0)
-    return round(sum(dx_l[-period:])/period, 2) if len(dx_l)>=period else None
+    return round(sum(dx_l[-period:])/period, 2) if len(dx_l) >= period else None
 
 
 def calc_bb_width(closes, period=20):
-    if len(closes)<period: return None
+    if len(closes) < period: return None
     sl   = closes[-period:]; mean = sum(sl)/period
     std  = math.sqrt(sum((x-mean)**2 for x in sl)/period)
     return round((mean+2*std-(mean-2*std))/mean, 4)
 
 
 def calc_volatility(closes, period=24):
-    """วัด volatility — ถ้าสูงเกินไป = ตลาด volatile"""
-    if len(closes)<period: return None
-    sl   = closes[-period:]
-    mean = sum(sl)/period
+    if len(closes) < period: return None
+    sl = closes[-period:]; mean = sum(sl)/period
     return math.sqrt(sum((x-mean)**2 for x in sl)/period) / mean
 
 
@@ -384,143 +390,304 @@ def calc_volatility(closes, period=24):
 
 def detect_regime():
     global current_regime, current_strategy, last_regime_check, regime_details
+    log("🔍 วิเคราะห์สภาพตลาด (Daily BTC)...")
 
-    log("🔍 กำลังวิเคราะห์สภาพตลาด (Daily)...")
-
-    # ดึงกราฟรายวัน
-    highs_1d, lows_1d, closes_1d = get_candles(SYMBOL, "1D", ADX_PERIOD*3+10)
-    _, _, closes_1h               = get_candles(SYMBOL, "60", 200)
+    highs_1d, lows_1d, closes_1d = get_candles("THB_BTC", "1D", ADX_PERIOD*3+10)
+    _, _, closes_1h               = get_candles("THB_BTC", "60", 200)
 
     if len(closes_1d) < ADX_PERIOD*2 or len(closes_1h) < 20:
-        log("⚠️ ข้อมูลไม่พอสำหรับ regime detection")
         return current_regime
 
-    score    = 0
-    details  = {}
+    score = 0; details = {}
 
-    # 1. ADX รายวัน — วัด trend strength
-    adx = calc_adx(highs_1d, lows_1d, closes_1d, ADX_PERIOD)
+    adx    = calc_adx(highs_1d, lows_1d, closes_1d, ADX_PERIOD)
     adx_ok = adx is not None and adx < ADX_THRESHOLD
     if adx_ok: score += 1
-    details["adx"]    = f"{adx:.1f}" if adx else "—"
-    details["adx_ok"] = adx_ok
+    details["adx"] = f"{adx:.1f}" if adx else "—"; details["adx_ok"] = adx_ok
 
-    # 2. Bollinger Band Width รายชั่วโมง
-    bb = calc_bb_width(closes_1h, BB_PERIOD)
+    bb    = calc_bb_width(closes_1h, 20)
     bb_ok = bb is not None and bb < BB_SQUEEZE_PCT
     if bb_ok: score += 1
-    details["bb"]    = f"{bb*100:.2f}%" if bb else "—"
-    details["bb_ok"] = bb_ok
+    details["bb"] = f"{bb*100:.2f}%" if bb else "—"; details["bb_ok"] = bb_ok
 
-    # 3. Weekly Range
-    wr = (max(closes_1h[-168:]) - min(closes_1h[-168:])) / min(closes_1h[-168:]) if len(closes_1h)>=168 else None
+    wr    = (max(closes_1h[-168:])-min(closes_1h[-168:]))/min(closes_1h[-168:]) if len(closes_1h) >= 168 else None
     wr_ok = wr is not None and wr < WEEKLY_RANGE_PCT
     if wr_ok: score += 1
-    details["wr"]    = f"{wr*100:.2f}%" if wr else "—"
-    details["wr_ok"] = wr_ok
+    details["wr"] = f"{wr*100:.2f}%" if wr else "—"; details["wr_ok"] = wr_ok
     details["score"] = score
 
-    # 4. Volatility check
-    vol = calc_volatility(closes_1h, 24)
-
-    # ตัดสินใจ regime
-    prev_regime    = current_regime
-    prev_strategy  = current_strategy
+    vol        = calc_volatility(closes_1h, 24)
+    prev_r     = current_regime
+    prev_s     = current_strategy
 
     if vol and vol > 0.04:
-        new_regime   = "VOLATILE"
-        new_strategy = "NONE"
+        new_r, new_s = "VOLATILE", "NONE"
     elif score >= REGIME_SCORE_MIN:
-        new_regime   = "SIDEWAY"
-        new_strategy = "RSI"
+        new_r, new_s = "SIDEWAY", "RSI"
     else:
-        new_regime   = "TRENDING"
-        new_strategy = "MA"
+        new_r, new_s = "TRENDING", "MA"
 
-    current_regime   = new_regime
-    current_strategy = new_strategy
+    current_regime   = new_r
+    current_strategy = new_s
     last_regime_check = time.time()
     regime_details   = details
 
-    log(f"🔍 Regime: {current_regime} | Strategy: {current_strategy} | Score: {score}/3 | ADX: {details['adx']} | BB: {details['bb']} | WR: {details['wr']}")
+    log(f"🔍 Regime: {new_r} | Strategy: {new_s} | Score: {score}/3 | ADX: {details['adx']}")
 
-    # แจ้ง Telegram ถ้าเปลี่ยน
-    if new_regime != prev_regime or new_strategy != prev_strategy:
-        icons = {"SIDEWAY":"📊","TRENDING":"📈","VOLATILE":"⚡"}
-        strat_desc = {
-            "RSI":  "RSI14 (1H) — ซื้อตอน Oversold",
-            "MA":   "MA12/26 (4H) — ซื้อตาม Trend",
-            "NONE": "หยุดรอ — ตลาดผันผวนมาก"
-        }
+    if new_r != prev_r or new_s != prev_s:
+        icons  = {"SIDEWAY":"📊","TRENDING":"📈","VOLATILE":"⚡"}
+        sdesc  = {"RSI":"RSI14 (1H)","MA":"MA12/26 (4H)","NONE":"หยุดรอ"}
         send_telegram(
-            f"{icons.get(new_regime,'❓')} <b>ตลาดเปลี่ยนเป็น {new_regime}!</b>\n"
-            f"{'─'*25}\n"
-            f"ADX: {details['adx']} {'✅' if adx_ok else '❌'}\n"
-            f"BB Width: {details['bb']} {'✅' if bb_ok else '❌'}\n"
-            f"Weekly Range: {details['wr']} {'✅' if wr_ok else '❌'}\n\n"
-            f"🧠 เปลี่ยนกลยุทธ์เป็น: <b>{strat_desc.get(new_strategy,'—')}</b>"
+            f"{icons.get(new_r,'❓')} <b>ตลาดเปลี่ยนเป็น {new_r}!</b>\n"
+            f"ADX: {details['adx']} {'✅' if adx_ok else '❌'} | "
+            f"BB: {details['bb']} {'✅' if bb_ok else '❌'} | "
+            f"WR: {details['wr']} {'✅' if wr_ok else '❌'}\n"
+            f"🧠 กลยุทธ์ใหม่: <b>{sdesc.get(new_s,'—')}</b>"
         )
-
-    return current_regime
+    return new_r
 
 
 # ==================== Strategies ====================
 
-def strategy_rsi(closes_1h):
-    """RSI Strategy สำหรับตลาด Sideway"""
-    rsi = calc_rsi(closes_1h, RSI_PERIOD)
-    if rsi is None: return None, None
-    if rsi < RSI_OVERSOLD:  return "buy",  f"RSI {rsi:.1f} (Oversold)"
-    if rsi > RSI_OVERBOUGHT: return "sell", f"RSI {rsi:.1f} (Overbought)"
-    return "hold", f"RSI {rsi:.1f}"
+def strategy_rsi(closes):
+    rsi = calc_rsi(closes, RSI_PERIOD)
+    if rsi is None: return None, None, rsi
+    if rsi < RSI_OVERSOLD:  return "buy",  f"RSI {rsi:.1f} Oversold",   rsi
+    if rsi > RSI_OVERBOUGHT: return "sell", f"RSI {rsi:.1f} Overbought", rsi
+    return "hold", f"RSI {rsi:.1f}", rsi
 
 
 def strategy_ma(closes_4h):
-    """MA Crossover สำหรับตลาด Trending"""
-    ma_fast = calc_ma(closes_4h, MA_FAST)
-    ma_slow = calc_ma(closes_4h, MA_SLOW)
-    if not ma_fast or not ma_slow: return None, None
+    maf = calc_ma(closes_4h, MA_FAST)
+    mas = calc_ma(closes_4h, MA_SLOW)
+    if not maf or not mas: return None, None
+    diff = (maf-mas)/mas*100
+    if diff > 0.3:  return "buy",  f"MA{MA_FAST}>{MA_SLOW} (+{diff:.2f}%)"
+    if diff < -0.3: return "sell", f"MA{MA_FAST}<{MA_SLOW} ({diff:.2f}%)"
+    return "hold", f"MA spread {diff:.2f}%"
 
-    # ต้องการ confirmation: MA ต้องตัดกันชัดเจน (> 0.3%)
-    diff_pct = (ma_fast - ma_slow) / ma_slow * 100
-    if diff_pct > 0.3:  return "buy",  f"MA{MA_FAST} > MA{MA_SLOW} (+{diff_pct:.2f}%)"
-    if diff_pct < -0.3: return "sell", f"MA{MA_FAST} < MA{MA_SLOW} ({diff_pct:.2f}%)"
-    return "hold", f"MA spread: {diff_pct:.2f}% (รอ confirmation)"
+
+# ==================== Weekly Backtest ====================
+
+def run_weekly_backtest(manual=False):
+    log("📊 เริ่ม Weekly Backtest...")
+    send_telegram("📊 <b>Weekly Backtest เริ่มแล้ว...</b>\nรอสักครู่นะครับ")
+
+    results = []
+    for c in COINS:
+        try:
+            _, _, closes = get_candles(c["symbol"], RSI_RESOLUTION, RSI_PERIOD+50)
+            if len(closes) < RSI_PERIOD+10:
+                results.append(f"❌ {c['name']}: ข้อมูลไม่พอ")
+                continue
+
+            thb = 10000; coin_bal = 0; entry = None
+            prev_sig = None; trades = []; wins = 0
+
+            for i in range(RSI_PERIOD+5, len(closes)):
+                price = closes[i]
+                rsi   = calc_rsi(closes[:i+1], RSI_PERIOD)
+                if rsi is None: continue
+
+                if entry and coin_bal > 0:
+                    if (price-entry)/entry <= -STOP_LOSS_PCT:
+                        pnl = (price-entry)/entry*(coin_bal*entry)
+                        thb += coin_bal*price*0.9975; coin_bal = 0; entry = None
+                        trades.append(pnl); prev_sig = "sell"; continue
+                    if (price-entry)/entry >= 0.05:
+                        pnl = (price-entry)/entry*(coin_bal*entry)
+                        thb += coin_bal*price*0.9975; coin_bal = 0; entry = None
+                        trades.append(pnl); if pnl > 0: wins += 1
+                        prev_sig = "sell"; continue
+
+                sig = "buy" if rsi < RSI_OVERSOLD else "sell" if rsi > RSI_OVERBOUGHT else "hold"
+                if sig == "buy" and prev_sig != "buy":
+                    amt = thb*0.1
+                    if amt >= 50:
+                        coin_bal = amt*0.9975/price; thb -= amt; entry = price
+                        trades.append(None)
+                    prev_sig = "buy"
+                elif sig == "sell" and prev_sig != "sell" and coin_bal > 0:
+                    pnl = (price-entry)/entry*(coin_bal*entry) if entry else 0
+                    thb += coin_bal*price*0.9975; coin_bal = 0; entry = None
+                    trades.append(pnl); if pnl > 0: wins += 1
+                    prev_sig = "sell"
+
+            if coin_bal > 0: thb += coin_bal*closes[-1]*0.9975
+            sell_trades = [t for t in trades if t is not None]
+            wr  = wins/len(sell_trades)*100 if sell_trades else 0
+            ret = (thb-10000)/10000*100
+            bnh = (closes[-1]-closes[RSI_PERIOD+5])/closes[RSI_PERIOD+5]*100
+            results.append(
+                f"{'📈' if ret>=0 else '📉'} <b>{c['name']}</b>: {ret:+.2f}% "
+                f"(B&H: {bnh:+.2f}%) | WR: {wr:.0f}% | {len(sell_trades)} trades"
+            )
+        except Exception as e:
+            results.append(f"❌ {c['name']}: Error — {e}")
+
+    label = "Manual" if manual else "Weekly Auto"
+    send_telegram(
+        f"📊 <b>Backtest Report ({label})</b>\n"
+        f"{'─'*25}\n"
+        f"ช่วงเวลา: {RSI_PERIOD+55} แท่ง ({RSI_RESOLUTION}H)\n\n"
+        + "\n".join(results)
+    )
+    log("📊 Backtest เสร็จแล้ว")
+
+
+def check_weekly_backtest():
+    global last_backtest_day
+    now = datetime.now()
+    if now.weekday() == 0 and now.day != last_backtest_day:
+        last_backtest_day = now.day
+        threading.Thread(target=run_weekly_backtest, daemon=True).start()
+
+
+# ==================== Trade Execution ====================
+
+def do_sell(symbol, coin_name, coin_bal, price, reason):
+    global trade_count, win_count, total_pnl
+    p      = positions[coin_name]
+    result = place_order("sell", symbol, coin_bal)
+    if result.get("error") == 0:
+        pnl        = (price-p["entry_price"])/p["entry_price"]*(coin_bal*p["entry_price"]) if p["entry_price"] else 0
+        total_pnl += pnl; trade_count += 1
+        if pnl > 0: win_count += 1
+        log(f"✅ {coin_name} {reason} | {pnl:+.2f} บาท")
+        send_telegram(
+            f"{'🚨' if 'Stop' in reason else '🔴'} <b>{reason} — {coin_name}</b>\n"
+            f"ซื้อที่: {p['entry_price']:,.0f} | ขายที่: {price:,.0f}\n"
+            f"{'📈' if pnl>=0 else '📉'} {pnl:+.2f} บาท | รวม: {total_pnl:+.2f} บาท"
+        )
+        p["entry_price"] = p["peak_price"] = None
+        p["last_trade"]  = time.time()
+        return True
+    send_telegram(f"❌ <b>ขาย {coin_name} ไม่สำเร็จ</b>\n{result}")
+    return False
+
+
+def process_coin(c):
+    global trade_count
+    symbol    = c["symbol"]
+    coin_name = c["name"]
+    p         = positions[coin_name]
+
+    _, _, closes_1h = get_candles(symbol, RSI_RESOLUTION, RSI_PERIOD+15)
+    _, _, closes_4h = get_candles(symbol, MA_RESOLUTION,  MA_SLOW+10)
+    if not closes_1h: return
+
+    price = closes_1h[-1]
+
+    # อัปเดต peak
+    if p["entry_price"] and price > (p["peak_price"] or 0):
+        p["peak_price"] = price
+
+    # Hard Stop
+    if p["entry_price"] and (price-p["entry_price"])/p["entry_price"] <= -STOP_LOSS_PCT:
+        cb = get_coin_balance(coin_name)
+        if cb > 0: do_sell(symbol, coin_name, cb, price, "Hard Stop Loss")
+        p["prev_signal"] = "sell"; return
+
+    # Trailing Stop
+    if p["entry_price"] and p["peak_price"] and (price-p["peak_price"])/p["peak_price"] <= -TRAILING_STOP_PCT:
+        cb  = get_coin_balance(coin_name)
+        pct = (price-p["peak_price"])/p["peak_price"]*100
+        if cb > 0: do_sell(symbol, coin_name, cb, price, f"Trailing Stop {abs(pct):.1f}%")
+        p["prev_signal"] = "sell"; return
+
+    if current_strategy == "NONE": return
+
+    # Cooldown
+    if not p["entry_price"] and p["last_trade"] and (time.time()-p["last_trade"]) < TRADE_COOLDOWN:
+        return
+
+    # เลือก strategy
+    if current_strategy == "RSI":
+        signal, reason, rsi = strategy_rsi(closes_1h)
+
+        # RSI Alert — แจ้งเตือนก่อนถึงจุดซื้อ
+        if rsi and RSI_OVERSOLD < rsi <= RSI_ALERT and not p["entry_price"]:
+            if not p["alerted"]:
+                p["alerted"] = True
+                send_telegram(
+                    f"⚠️ <b>RSI Alert — {coin_name}</b>\n"
+                    f"RSI: {rsi:.1f} ใกล้ Oversold แล้ว!\n"
+                    f"Bot จะซื้ออัตโนมัติเมื่อ RSI &lt; {RSI_OVERSOLD}"
+                )
+        elif rsi and rsi > RSI_ALERT:
+            p["alerted"] = False
+
+    elif current_strategy == "MA":
+        result = strategy_ma(closes_4h)
+        signal, reason = result if result else ("hold", "—")
+        rsi = None
+    else:
+        return
+
+    if signal is None: return
+
+    pct_text = f" | {(price-p['entry_price'])/p['entry_price']*100:+.2f}%" if p["entry_price"] else ""
+    log(f"  {coin_name}: {price:,.0f} | {reason}{pct_text}")
+
+    if signal == "buy" and p["prev_signal"] != "buy":
+        thb    = get_thb_balance()
+        amount = round(thb * POSITION_PCT, 2)
+        if amount < c["min_order"]:
+            send_telegram(f"⚠️ <b>{coin_name}</b> ยอดเงินไม่พอ ({thb:,.0f} บาท)")
+        else:
+            r = place_order("buy", symbol, amount)
+            if r.get("error") == 0:
+                p["entry_price"] = price
+                p["peak_price"]  = price
+                p["last_trade"]  = time.time()
+                trade_count     += 1
+                log(f"✅ BUY {coin_name} {amount:,.2f} บาท")
+                send_telegram(
+                    f"🟢 <b>BUY {coin_name}</b>\n"
+                    f"กลยุทธ์: {current_strategy} ({reason})\n"
+                    f"ตลาด: {current_regime}\n"
+                    f"ราคา: {price:,.0f} | ใช้: {amount:,.2f} บาท\n"
+                    f"🛑 Hard Stop: {price*(1-STOP_LOSS_PCT):,.0f}\n"
+                    f"📉 Trailing: {TRAILING_STOP_PCT*100:.0f}% จาก peak"
+                )
+            else:
+                send_telegram(f"❌ <b>ซื้อ {coin_name} ไม่สำเร็จ</b>\n{r}")
+        p["prev_signal"] = "buy"
+
+    elif signal == "sell" and p["prev_signal"] != "sell":
+        cb = get_coin_balance(coin_name)
+        if cb > 0: do_sell(symbol, coin_name, cb, price, f"{current_strategy} Sell")
+        else: log(f"  {coin_name}: ไม่มีเหรียญในกระเป๋า")
+        p["prev_signal"] = "sell"
 
 
 # ==================== Main Loop ====================
 
 def run_bot():
-    global entry_price, peak_price, is_paused, pause_until
-    global trade_count, win_count, total_pnl, current_regime, last_trade_time
+    global is_paused, pause_until
 
-    log("🤖 Bitkub Adaptive Bot เริ่มทำงาน!")
-    log(f"⏱️  Scan: ทุก {SCAN_INTERVAL//60} นาที | Regime: ทุก {REGIME_INTERVAL//3600} ชั่วโมง | Cooldown: {TRADE_COOLDOWN//3600} ชั่วโมง")
+    log("🤖 Bitkub Adaptive Bot V2 เริ่มทำงาน!")
+    log(f"🪙 เหรียญ: {', '.join(c['name'] for c in COINS)}")
+    log(f"⏱️  Scan: {SCAN_INTERVAL//60}m | Regime: {REGIME_INTERVAL//3600}h | Cooldown: {TRADE_COOLDOWN//3600}h")
     log("=" * 60)
 
     send_telegram(
-        "🤖 <b>Bitkub Adaptive Bot เริ่มทำงาน!</b>\n"
+        "🤖 <b>Bitkub Adaptive Bot V2 เริ่มทำงาน!</b>\n"
         f"{'─'*25}\n"
-        f"🧠 ปรับกลยุทธ์อัตโนมัติตามสภาพตลาด\n"
-        f"📊 Sideway → RSI14 (1H)\n"
-        f"📈 Trending → MA12/26 (4H)\n"
-        f"⚡ Volatile → หยุดรอ\n\n"
-        f"⏱️ ตรวจสัญญาณทุก {SCAN_INTERVAL//60} นาที\n"
-        f"🔄 วิเคราะห์ตลาดทุก {REGIME_INTERVAL//3600} ชั่วโมง\n"
-        f"⏳ Cooldown {TRADE_COOLDOWN//3600} ชั่วโมงระหว่าง trade\n"
+        f"🪙 เหรียญ: {', '.join(c['name'] for c in COINS)}\n"
+        f"🧠 Adaptive Strategy (RSI / MA)\n"
+        f"⚠️ RSI Alert ที่ &lt; {RSI_ALERT}\n"
+        f"📊 Weekly Backtest ทุกวันจันทร์\n"
+        f"⏱️ Scan ทุก {SCAN_INTERVAL//60} นาที\n"
         f"🛑 Hard Stop: {STOP_LOSS_PCT*100:.0f}% | Trailing: {TRAILING_STOP_PCT*100:.0f}%\n\n"
         f"พิมพ์ /help เพื่อดูคำสั่งทั้งหมด"
     )
 
     threading.Thread(target=process_commands, daemon=True).start()
-
-    # วิเคราะห์ตลาดครั้งแรก
     detect_regime()
-    prev_signal = None
 
     while True:
         try:
-            # เช็ค pause
             if is_paused:
                 if pause_until and time.time() >= pause_until:
                     is_paused = False; pause_until = None
@@ -528,102 +695,18 @@ def run_bot():
                 else:
                     time.sleep(SCAN_INTERVAL); continue
 
-            # วิเคราะห์ตลาดทุก 4 ชั่วโมง
             if time.time() - last_regime_check > REGIME_INTERVAL:
                 detect_regime()
 
-            # ดึงข้อมูลตาม strategy
-            _, _, closes_1h = get_candles(SYMBOL, RSI_RESOLUTION, RSI_PERIOD+15)
-            _, _, closes_4h = get_candles(SYMBOL, MA_RESOLUTION,  MA_SLOW+10)
+            check_weekly_backtest()
 
-            if not closes_1h:
-                log("⏳ ดึงข้อมูลไม่ได้ รอต่อไป...")
-                time.sleep(SCAN_INTERVAL); continue
-
-            current_price = closes_1h[-1]
-
-            # อัปเดต peak
-            if entry_price and current_price > (peak_price or 0):
-                peak_price = current_price
-
-            # แสดง log สรุป
-            pct_text = f" | {(current_price-entry_price)/entry_price*100:+.2f}%" if entry_price else ""
-            log(f"💰 {current_price:,.0f} | Regime: {current_regime} | Strategy: {current_strategy}{pct_text}")
-
-            # ========== Hard Stop Loss ==========
-            if entry_price and (current_price-entry_price)/entry_price <= -STOP_LOSS_PCT:
-                cb = get_coin()
-                if cb > 0: do_sell(cb, current_price, f"Hard Stop Loss {STOP_LOSS_PCT*100:.0f}%")
-                prev_signal = "sell"; time.sleep(SCAN_INTERVAL); continue
-
-            # ========== Trailing Stop ==========
-            if entry_price and peak_price and (current_price-peak_price)/peak_price <= -TRAILING_STOP_PCT:
-                cb  = get_coin()
-                pct = (current_price-peak_price)/peak_price*100
-                if cb > 0: do_sell(cb, current_price, f"Trailing Stop ลง {abs(pct):.1f}% จาก peak")
-                prev_signal = "sell"; time.sleep(SCAN_INTERVAL); continue
-
-            # ========== ไม่เทรดถ้า Volatile ==========
-            if current_strategy == "NONE":
-                log(f"⚡ ตลาด Volatile — รอ")
-                time.sleep(SCAN_INTERVAL); continue
-
-            # ========== เช็ค Cooldown ==========
-            cooldown_remaining = TRADE_COOLDOWN - (time.time() - last_trade_time)
-            if last_trade_time and cooldown_remaining > 0 and not entry_price:
-                log(f"⏳ Cooldown: อีก {int(cooldown_remaining/60)} นาที")
-                time.sleep(SCAN_INTERVAL); continue
-
-            # ========== เลือก Strategy ==========
-            if current_strategy == "RSI":
-                signal, reason = strategy_rsi(closes_1h)
-            elif current_strategy == "MA" and closes_4h:
-                signal, reason = strategy_ma(closes_4h)
-            else:
-                signal, reason = "hold", "ไม่มีข้อมูลเพียงพอ"
-
-            if signal is None:
-                time.sleep(SCAN_INTERVAL); continue
-
-            log(f"📡 Signal: {signal.upper()} | {reason}")
-
-            # ========== BUY ==========
-            if signal == "buy" and prev_signal != "buy":
-                thb    = get_thb()
-                amount = round(thb * POSITION_PCT, 2)
-                if amount < MIN_ORDER_THB:
-                    send_telegram(f"⚠️ <b>ยอดเงินไม่พอ</b>\nมี {thb:,.2f} บาท")
-                else:
-                    r = place_order("buy", amount)
-                    if r.get("error") == 0:
-                        entry_price = current_price
-                        peak_price  = current_price
-                        trade_count += 1
-                        last_trade_time = time.time()
-                        log(f"✅ BUY {amount:,.2f} บาท | {reason}")
-                        send_telegram(
-                            f"🟢 <b>BUY {SYMBOL.split('_')[1]}</b>\n"
-                            f"กลยุทธ์: {current_strategy} ({reason})\n"
-                            f"ตลาด: {current_regime}\n"
-                            f"ราคา: {current_price:,.0f} บาท\n"
-                            f"ใช้เงิน: {amount:,.2f} บาท\n"
-                            f"🛑 Hard Stop: {current_price*(1-STOP_LOSS_PCT):,.0f}\n"
-                            f"📉 Trailing: {TRAILING_STOP_PCT*100:.0f}% จาก peak"
-                        )
-                    else:
-                        send_telegram(f"❌ <b>ซื้อไม่สำเร็จ</b>\n{r}")
-                prev_signal = "buy"
-
-            # ========== SELL ==========
-            elif signal == "sell" and prev_signal != "sell":
-                cb = get_coin()
-                if cb > 0: do_sell(cb, current_price, f"{current_strategy} Sell ({reason})")
-                else: log("⚠️ ไม่มีเหรียญในกระเป๋า")
-                prev_signal = "sell"
-
-            # ========== HOLD ==========
-            else:
-                if signal != prev_signal: prev_signal = signal
+            log(f"── Scan | Regime: {current_regime} | Strategy: {current_strategy} ──")
+            for c in COINS:
+                try:
+                    process_coin(c)
+                except Exception as e:
+                    log(f"❌ {c['name']} error: {e}")
+                time.sleep(1)
 
         except KeyboardInterrupt:
             log("🛑 หยุด bot")
