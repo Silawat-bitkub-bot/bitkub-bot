@@ -22,8 +22,8 @@ BASE_URL         = "https://api.bitkub.com"
 
 # ========== ตั้งค่าหลัก ==========
 COINS = [
-    {"symbol": "THB_BTC", "name": "BTC", "min_order": 50},
-    {"symbol": "THB_ETH", "name": "ETH", "min_order": 50},
+    {"symbol": "THB_BTC", "name": "BTC", "min_order": 50, "reserve": 0.0},
+    {"symbol": "THB_ETH", "name": "ETH", "min_order": 50, "reserve": 0.0},
 ]
 POSITION_PCT      = 0.10        # 10% ต่อเหรียญ (BTC+ETH = 20% รวม)
 STOP_LOSS_PCT     = 0.05
@@ -328,9 +328,10 @@ def place_order(side, symbol, amount):
     return api_request("POST", path, {"sym": f"{coin}_thb", "amt": amount, "rat": 0, "typ": "market"})
 
 
-def get_coin_balance(coin_name):
+def get_coin_balance(coin_name, reserve=0.0):
     b = get_balances(); v = b.get(coin_name, {})
-    return float(v.get("available", 0)) if isinstance(v, dict) else float(v)
+    total = float(v.get("available", 0)) if isinstance(v, dict) else float(v)
+    return max(total - reserve, 0)
 
 
 def get_thb_balance():
@@ -567,6 +568,7 @@ def do_sell(symbol, coin_name, coin_bal, price, reason):
 
 
 def process_coin(c):
+    reserve = c.get("reserve", 0.0)
     global trade_count
     symbol    = c["symbol"]
     coin_name = c["name"]
@@ -584,13 +586,13 @@ def process_coin(c):
 
     # Hard Stop
     if p["entry_price"] and (price-p["entry_price"])/p["entry_price"] <= -STOP_LOSS_PCT:
-        cb = get_coin_balance(coin_name)
+        cb = get_coin_balance(coin_name, reserve)
         if cb > 0: do_sell(symbol, coin_name, cb, price, "Hard Stop Loss")
         p["prev_signal"] = "sell"; return
 
     # Trailing Stop
     if p["entry_price"] and p["peak_price"] and (price-p["peak_price"])/p["peak_price"] <= -TRAILING_STOP_PCT:
-        cb  = get_coin_balance(coin_name)
+        cb  = get_coin_balance(coin_name, reserve)
         pct = (price-p["peak_price"])/p["peak_price"]*100
         if cb > 0: do_sell(symbol, coin_name, cb, price, f"Trailing Stop {abs(pct):.1f}%")
         p["prev_signal"] = "sell"; return
@@ -655,7 +657,7 @@ def process_coin(c):
         p["prev_signal"] = "buy"
 
     elif signal == "sell" and p["prev_signal"] != "sell":
-        cb = get_coin_balance(coin_name)
+        cb = get_coin_balance(coin_name, reserve)
         if cb > 0: do_sell(symbol, coin_name, cb, price, f"{current_strategy} Sell")
         else: log(f"  {coin_name}: ไม่มีเหรียญในกระเป๋า")
         p["prev_signal"] = "sell"
