@@ -9,6 +9,7 @@ Bitkub Adaptive Bot V2
 - Telegram Commands
 """
 import os, time, hmac, hashlib, requests, json, threading, math
+import http.server, socketserver
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -721,7 +722,59 @@ def run_bot():
         time.sleep(SCAN_INTERVAL)
 
 
+# ==================== Web Dashboard Server ====================
+
+DASHBOARD_HTML = open(os.path.join(os.path.dirname(__file__), "dashboard.html"), encoding="utf-8").read() if os.path.exists("dashboard.html") else "<h1>Dashboard not found</h1>"
+
+def get_bot_state():
+    """คืนค่า state ปัจจุบันของ Bot เป็น JSON"""
+    pos = {}
+    for c in COINS:
+        p = positions[c["name"]]
+        pos[c["name"]] = {
+            "entry_price": p["entry_price"],
+            "peak_price":  p["peak_price"],
+        }
+    return json.dumps({
+        "regime":    current_regime,
+        "strategy":  current_strategy,
+        "is_paused": is_paused,
+        "trade_count": trade_count,
+        "win_count":   win_count,
+        "total_pnl":   round(total_pnl, 2),
+        "uptime":      str(datetime.now() - start_time).split(".")[0],
+        "positions":   pos,
+        "regime_details": regime_details,
+    })
+
+
+class DashboardHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args): pass  # ปิด access log
+
+    def do_GET(self):
+        if self.path == "/api/state":
+            data = get_bot_state().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(DASHBOARD_HTML.encode())
+
+
+def start_dashboard():
+    port = int(os.getenv("PORT", 8080))
+    with socketserver.TCPServer(("", port), DashboardHandler) as httpd:
+        log(f"🌐 Dashboard: http://localhost:{port}")
+        httpd.serve_forever()
+
+
 if __name__ == "__main__":
     if not API_KEY or not API_SECRET:
         print("❌ ไม่พบ API Key!"); exit(1)
+    threading.Thread(target=start_dashboard, daemon=True).start()
     run_bot()

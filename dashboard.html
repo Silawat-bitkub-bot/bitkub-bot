@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Bitkub Bot</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #080b10;
+  --bg2:       #0d1219;
+  --bg3:       #131a24;
+  --border:    #1e2d3d;
+  --border2:   #243344;
+  --text:      #c8d8e8;
+  --text2:     #6a8ba8;
+  --text3:     #3a5570;
+  --green:     #00e5a0;
+  --green2:    #00a870;
+  --red:       #ff4560;
+  --red2:      #c0203a;
+  --yellow:    #f0b429;
+  --blue:      #3a9eff;
+  --purple:    #a78bfa;
+  --mono:      'IBM Plex Mono', monospace;
+  --sans:      'Sarabun', sans-serif;
+}
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Grid noise overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(0,229,160,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,229,160,0.015) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── Header ── */
+header {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(8,11,16,0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 24px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.logo {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.15em;
+  color: var(--green);
+  text-transform: uppercase;
+}
+.logo span { color: var(--text2); }
+.header-right { display: flex; align-items: center; gap: 16px; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity: 1; } 50% { opacity: 0.4; }
+}
+.status-dot.offline { background: var(--red); box-shadow: 0 0 8px var(--red); animation: none; }
+.regime-badge {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  padding: 4px 10px;
+  border-radius: 4px;
+  letter-spacing: 0.1em;
+  border: 1px solid;
+}
+.regime-sideway  { color: var(--green);  border-color: var(--green2);  background: rgba(0,229,160,0.08); }
+.regime-trending { color: var(--yellow); border-color: #a07010;        background: rgba(240,180,41,0.08); }
+.regime-volatile { color: var(--red);    border-color: var(--red2);    background: rgba(255,69,96,0.08); }
+.regime-unknown  { color: var(--text2);  border-color: var(--border2); background: transparent; }
+.refresh-btn {
+  font-family: var(--mono); font-size: 0.7rem;
+  color: var(--text2); background: none; border: 1px solid var(--border2);
+  padding: 4px 10px; border-radius: 4px; cursor: pointer;
+  transition: all 0.2s;
+}
+.refresh-btn:hover { color: var(--text); border-color: var(--text2); }
+
+/* ── Main layout ── */
+main { position: relative; z-index: 1; padding: 24px; max-width: 1100px; margin: 0 auto; }
+
+/* ── Price Row ── */
+.price-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.price-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 24px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s;
+}
+.price-card:hover { border-color: var(--border2); }
+.price-card::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 2px;
+}
+.price-card.btc::after { background: linear-gradient(90deg, var(--yellow), transparent); }
+.price-card.eth::after { background: linear-gradient(90deg, var(--purple), transparent); }
+.coin-label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.15em;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+.coin-price {
+  font-family: var(--mono);
+  font-size: 1.8rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1;
+  margin-bottom: 6px;
+}
+.coin-change {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+.coin-change.up   { color: var(--green); }
+.coin-change.down { color: var(--red); }
+.coin-meta {
+  margin-top: 12px;
+  display: flex; gap: 16px;
+}
+.coin-meta-item { display: flex; flex-direction: column; gap: 2px; }
+.coin-meta-label { font-size: 0.65rem; color: var(--text3); font-family: var(--mono); letter-spacing: 0.08em; }
+.coin-meta-val   { font-size: 0.8rem;  color: var(--text);  font-family: var(--mono); }
+
+/* RSI Gauge */
+.rsi-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.rsi-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 24px;
+}
+.rsi-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 14px;
+}
+.rsi-title { font-family: var(--mono); font-size: 0.7rem; color: var(--text2); letter-spacing: 0.12em; }
+.rsi-value {
+  font-family: var(--mono);
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+.rsi-value.oversold   { color: var(--green); }
+.rsi-value.overbought { color: var(--red); }
+.rsi-value.normal     { color: var(--text); }
+.rsi-bar-track {
+  height: 8px; background: var(--bg3);
+  border-radius: 4px; overflow: hidden;
+  position: relative; margin-bottom: 6px;
+}
+.rsi-bar-fill {
+  height: 100%; border-radius: 4px;
+  transition: width 0.6s cubic-bezier(0.4,0,0.2,1), background 0.4s;
+}
+.rsi-zones {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 0.6rem; color: var(--text3);
+}
+.rsi-signal {
+  margin-top: 10px;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  padding: 5px 10px;
+  border-radius: 4px;
+  display: inline-block;
+}
+.rsi-signal.buy  { background: rgba(0,229,160,0.1); color: var(--green); border: 1px solid var(--green2); }
+.rsi-signal.sell { background: rgba(255,69,96,0.1);  color: var(--red);   border: 1px solid var(--red2); }
+.rsi-signal.hold { background: var(--bg3); color: var(--text2); border: 1px solid var(--border2); }
+.rsi-signal.alert { background: rgba(240,180,41,0.1); color: var(--yellow); border: 1px solid #a07010; }
+
+/* Stats Row */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.stat-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+.stat-label { font-family: var(--mono); font-size: 0.65rem; color: var(--text3); letter-spacing: 0.1em; margin-bottom: 6px; }
+.stat-value { font-family: var(--mono); font-size: 1.1rem; font-weight: 600; color: var(--text); }
+.stat-value.green  { color: var(--green); }
+.stat-value.red    { color: var(--red); }
+.stat-value.yellow { color: var(--yellow); }
+
+/* Regime Box */
+.regime-box {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 24px;
+  margin-bottom: 20px;
+}
+.regime-title { font-family: var(--mono); font-size: 0.7rem; color: var(--text2); letter-spacing: 0.12em; margin-bottom: 14px; }
+.regime-indicators { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.ri-item {}
+.ri-label { font-size: 0.65rem; color: var(--text3); font-family: var(--mono); letter-spacing: 0.08em; margin-bottom: 4px; }
+.ri-val   { font-size: 0.9rem; font-family: var(--mono); font-weight: 500; margin-bottom: 6px; }
+.ri-bar   { height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
+.ri-fill  { height: 100%; border-radius: 2px; transition: width 0.6s, background 0.4s; }
+
+/* Positions */
+.positions-box {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 24px;
+  margin-bottom: 20px;
+}
+.positions-title { font-family: var(--mono); font-size: 0.7rem; color: var(--text2); letter-spacing: 0.12em; margin-bottom: 14px; }
+.no-pos { font-size: 0.8rem; color: var(--text3); font-family: var(--mono); }
+.pos-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pos-item:last-child { border-bottom: none; }
+.pos-left { display: flex; flex-direction: column; gap: 3px; }
+.pos-coin { font-family: var(--mono); font-size: 0.85rem; font-weight: 600; }
+.pos-entry { font-family: var(--mono); font-size: 0.7rem; color: var(--text2); }
+.pos-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.pos-current { font-family: var(--mono); font-size: 0.85rem; }
+.pos-pct { font-family: var(--mono); font-size: 0.7rem; font-weight: 600; }
+.pos-pct.up   { color: var(--green); }
+.pos-pct.down { color: var(--red); }
+
+/* Trades Table */
+.trades-box {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.trades-header {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text2);
+  letter-spacing: 0.12em;
+}
+table { width: 100%; border-collapse: collapse; }
+thead th {
+  padding: 10px 24px;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--text3);
+  letter-spacing: 0.1em;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg3);
+}
+tbody td {
+  padding: 11px 24px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text2);
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: rgba(255,255,255,0.02); }
+.td-buy   { color: var(--green) !important; }
+.td-sell  { color: var(--red) !important; }
+.td-stop  { color: var(--yellow) !important; }
+.td-trail { color: var(--blue) !important; }
+.td-pnl-pos { color: var(--green); }
+.td-pnl-neg { color: var(--red); }
+.empty-row td { text-align: center; color: var(--text3); padding: 32px !important; }
+
+/* Footer */
+footer {
+  text-align: center;
+  padding: 16px;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--text3);
+  letter-spacing: 0.08em;
+  border-top: 1px solid var(--border);
+}
+
+/* Mobile */
+@media (max-width: 640px) {
+  main { padding: 14px; }
+  .price-row, .rsi-row { grid-template-columns: 1fr; gap: 12px; }
+  .stats-row { grid-template-columns: 1fr 1fr; gap: 12px; }
+  .regime-indicators { grid-template-columns: 1fr; gap: 10px; }
+  .coin-price { font-size: 1.4rem; }
+  thead th, tbody td { padding: 10px 14px; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">BITKUB <span>//</span> ADAPTIVE BOT</div>
+  <div class="header-right">
+    <span class="regime-badge regime-unknown" id="regime-badge">LOADING</span>
+    <div class="status-dot" id="status-dot"></div>
+    <button class="refresh-btn" onclick="refresh()">↻ REFRESH</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- Price Cards -->
+  <div class="price-row">
+    <div class="price-card btc">
+      <div class="coin-label">BTC / THB</div>
+      <div class="coin-price" id="btc-price">—</div>
+      <div class="coin-change" id="btc-change">—</div>
+      <div class="coin-meta">
+        <div class="coin-meta-item">
+          <span class="coin-meta-label">HIGH 24H</span>
+          <span class="coin-meta-val" id="btc-high">—</span>
+        </div>
+        <div class="coin-meta-item">
+          <span class="coin-meta-label">LOW 24H</span>
+          <span class="coin-meta-val" id="btc-low">—</span>
+        </div>
+        <div class="coin-meta-item">
+          <span class="coin-meta-label">VOLUME</span>
+          <span class="coin-meta-val" id="btc-vol">—</span>
+        </div>
+      </div>
+    </div>
+    <div class="price-card eth">
+      <div class="coin-label">ETH / THB</div>
+      <div class="coin-price" id="eth-price">—</div>
+      <div class="coin-change" id="eth-change">—</div>
+      <div class="coin-meta">
+        <div class="coin-meta-item">
+          <span class="coin-meta-label">HIGH 24H</span>
+          <span class="coin-meta-val" id="eth-high">—</span>
+        </div>
+        <div class="coin-meta-item">
+          <span class="coin-meta-label">LOW 24H</span>
+          <span class="coin-meta-val" id="eth-low">—</span>
+        </div>
+        <div class="coin-meta-item">
+          <span class="coin-meta-label">VOLUME</span>
+          <span class="coin-meta-val" id="eth-vol">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RSI Cards -->
+  <div class="rsi-row">
+    <div class="rsi-card">
+      <div class="rsi-header">
+        <span class="rsi-title">RSI 14 — BTC (1H)</span>
+        <span class="rsi-value normal" id="btc-rsi-val">—</span>
+      </div>
+      <div class="rsi-bar-track">
+        <div class="rsi-bar-fill" id="btc-rsi-bar" style="width:0%"></div>
+      </div>
+      <div class="rsi-zones">
+        <span>0</span><span>OVERSOLD 30</span><span>50</span><span>OVERBOUGHT 70</span><span>100</span>
+      </div>
+      <div class="rsi-signal hold" id="btc-rsi-signal">HOLD</div>
+    </div>
+    <div class="rsi-card">
+      <div class="rsi-header">
+        <span class="rsi-title">RSI 14 — ETH (1H)</span>
+        <span class="rsi-value normal" id="eth-rsi-val">—</span>
+      </div>
+      <div class="rsi-bar-track">
+        <div class="rsi-bar-fill" id="eth-rsi-bar" style="width:0%"></div>
+      </div>
+      <div class="rsi-zones">
+        <span>0</span><span>OVERSOLD 30</span><span>50</span><span>OVERBOUGHT 70</span><span>100</span>
+      </div>
+      <div class="rsi-signal hold" id="eth-rsi-signal">HOLD</div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">TOTAL PNL</div>
+      <div class="stat-value" id="stat-pnl">+0.00 ฿</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">TRADES</div>
+      <div class="stat-value" id="stat-trades">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">WIN RATE</div>
+      <div class="stat-value" id="stat-wr">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">STRATEGY</div>
+      <div class="stat-value yellow" id="stat-strat">—</div>
+    </div>
+  </div>
+
+  <!-- Regime Detection -->
+  <div class="regime-box">
+    <div class="regime-title">MARKET REGIME DETECTION</div>
+    <div class="regime-indicators">
+      <div class="ri-item">
+        <div class="ri-label">ADX (TREND STRENGTH)</div>
+        <div class="ri-val" id="ri-adx">—</div>
+        <div class="ri-bar"><div class="ri-fill" id="ri-adx-bar" style="width:0%"></div></div>
+      </div>
+      <div class="ri-item">
+        <div class="ri-label">BOLLINGER BAND WIDTH</div>
+        <div class="ri-val" id="ri-bb">—</div>
+        <div class="ri-bar"><div class="ri-fill" id="ri-bb-bar" style="width:0%"></div></div>
+      </div>
+      <div class="ri-item">
+        <div class="ri-label">WEEKLY RANGE</div>
+        <div class="ri-val" id="ri-wr">—</div>
+        <div class="ri-bar"><div class="ri-fill" id="ri-wr-bar" style="width:0%"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Open Positions -->
+  <div class="positions-box">
+    <div class="positions-title">OPEN POSITIONS</div>
+    <div id="positions-list"><div class="no-pos">ไม่มี position ที่เปิดอยู่</div></div>
+  </div>
+
+  <!-- Trade History -->
+  <div class="trades-box">
+    <div class="trades-header">TRADE HISTORY (SIMULATED)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>TIME</th><th>COIN</th><th>TYPE</th><th>PRICE</th><th>PNL</th>
+        </tr>
+      </thead>
+      <tbody id="trades-body">
+        <tr class="empty-row"><td colspan="5">ยังไม่มี trade</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer id="footer">LAST UPDATE: —</footer>
+
+<script>
+const API = "https://api.bitkub.com";
+
+// Simulated trade history (จะถูกแทนด้วยข้อมูลจริงเมื่อ Bot เทรด)
+const trades = [
+  { time: "2026-05-17 08:30", coin: "BTC", type: "BUY",  price: 2534000, pnl: null },
+  { time: "2026-05-16 22:10", coin: "ETH", type: "BUY",  price: 81200,   pnl: null },
+  { time: "2026-05-16 14:00", coin: "BTC", type: "SELL", price: 2558000, pnl: 54.2 },
+  { time: "2026-05-15 09:30", coin: "ETH", type: "TRAIL STOP", price: 79100, pnl: -28.4 },
+];
+
+function fmt(n, dec=0) {
+  return Number(n).toLocaleString('th-TH', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+}
+
+function calcRsi(prices, period=14) {
+  if (prices.length < period+1) return null;
+  let gains = 0, losses = 0;
+  for (let i = prices.length-period; i < prices.length; i++) {
+    const d = prices[i] - prices[i-1];
+    if (d > 0) gains += d; else losses -= d;
+  }
+  const ag = gains/period, al = losses/period;
+  return al === 0 ? 100 : Math.round((100 - 100/(1+ag/al))*10)/10;
+}
+
+function calcBBWidth(prices, period=20) {
+  if (prices.length < period) return null;
+  const sl = prices.slice(-period);
+  const mean = sl.reduce((a,b)=>a+b,0)/period;
+  const std  = Math.sqrt(sl.reduce((a,b)=>a+(b-mean)**2,0)/period);
+  return ((mean+2*std)-(mean-2*std))/mean;
+}
+
+function updateRsiCard(coin, rsi) {
+  const valEl  = document.getElementById(`${coin}-rsi-val`);
+  const barEl  = document.getElementById(`${coin}-rsi-bar`);
+  const sigEl  = document.getElementById(`${coin}-rsi-signal`);
+
+  if (rsi === null) return;
+  valEl.textContent = rsi.toFixed(1);
+
+  const pct = Math.min(Math.max(rsi, 0), 100);
+  barEl.style.width = pct + '%';
+
+  if (rsi < 30) {
+    barEl.style.background = 'var(--green)';
+    valEl.className = 'rsi-value oversold';
+    sigEl.textContent = '🟢 OVERSOLD — BUY SIGNAL';
+    sigEl.className   = 'rsi-signal buy';
+  } else if (rsi > 70) {
+    barEl.style.background = 'var(--red)';
+    valEl.className = 'rsi-value overbought';
+    sigEl.textContent = '🔴 OVERBOUGHT — SELL SIGNAL';
+    sigEl.className   = 'rsi-signal sell';
+  } else if (rsi < 35) {
+    barEl.style.background = 'var(--yellow)';
+    valEl.className = 'rsi-value normal';
+    sigEl.textContent = '⚠️ RSI ALERT — ใกล้ Oversold';
+    sigEl.className   = 'rsi-signal alert';
+  } else {
+    barEl.style.background = 'linear-gradient(90deg, var(--green2), var(--blue))';
+    valEl.className = 'rsi-value normal';
+    sigEl.textContent = '⏸ HOLD';
+    sigEl.className   = 'rsi-signal hold';
+  }
+}
+
+async function fetchTicker(sym) {
+  try {
+    const r = await fetch(`${API}/api/market/ticker?sym=${sym}`);
+    const d = await r.json();
+    return d[sym] || {};
+  } catch { return {}; }
+}
+
+async function fetchCandles(sym, res='60', limit=50) {
+  try {
+    const parts = sym.toLowerCase().split('_');
+    const s     = `${parts[1]}_${parts[0]}`;
+    const end   = Math.floor(Date.now()/1000);
+    const mult  = res==='60'?3600:86400;
+    const r     = await fetch(`${API}/tradingview/history?symbol=${s.toUpperCase()}&resolution=${res}&from=${end-limit*mult}&to=${end}`);
+    const d     = await r.json();
+    return d.s==='ok' ? d.c : [];
+  } catch { return []; }
+}
+
+function renderRegime(closes1h) {
+  const bb = calcBBWidth(closes1h);
+  const wr = closes1h.length>=168 ? (Math.max(...closes1h.slice(-168))-Math.min(...closes1h.slice(-168)))/Math.min(...closes1h.slice(-168)) : null;
+
+  let score = 0;
+  const bbOk = bb !== null && bb < 0.05;
+  const wrOk = wr !== null && wr < 0.08;
+  if (bbOk) score++;
+  if (wrOk) score++;
+
+  // BB
+  const bbPct = bb ? Math.min(bb*2000, 100) : 0;
+  document.getElementById('ri-bb').textContent     = bb ? (bb*100).toFixed(2)+'%' : '—';
+  document.getElementById('ri-bb-bar').style.width = bbPct+'%';
+  document.getElementById('ri-bb-bar').style.background = bbOk ? 'var(--green)' : 'var(--red)';
+
+  // WR
+  const wrPct = wr ? Math.min(wr*600, 100) : 0;
+  document.getElementById('ri-wr').textContent     = wr ? (wr*100).toFixed(2)+'%' : '—';
+  document.getElementById('ri-wr-bar').style.width = wrPct+'%';
+  document.getElementById('ri-wr-bar').style.background = wrOk ? 'var(--green)' : 'var(--red)';
+
+  // ADX placeholder
+  document.getElementById('ri-adx').textContent     = 'ดูใน Terminal';
+  document.getElementById('ri-adx-bar').style.width = '50%';
+  document.getElementById('ri-adx-bar').style.background = 'var(--blue)';
+
+  // Regime badge
+  const badge  = document.getElementById('regime-badge');
+  const regime = score >= 1 ? 'SIDEWAY' : 'TRENDING';
+  badge.textContent = regime;
+  badge.className   = `regime-badge regime-${regime.toLowerCase()}`;
+
+  // Strategy
+  document.getElementById('stat-strat').textContent = score>=1 ? 'RSI' : 'MA';
+}
+
+function renderTrades() {
+  const tbody = document.getElementById('trades-body');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="5">ยังไม่มี trade</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.slice(0,10).map(t => {
+    const typeClass = {BUY:'td-buy', SELL:'td-sell', 'HARD STOP':'td-stop', 'TRAIL STOP':'td-trail'}[t.type] || '';
+    const pnlHtml   = t.pnl != null
+      ? `<span class="${t.pnl>=0?'td-pnl-pos':'td-pnl-neg'}">${t.pnl>=0?'+':''}${fmt(t.pnl,2)} ฿</span>`
+      : '<span style="color:var(--text3)">—</span>';
+    return `<tr>
+      <td>${t.time}</td>
+      <td style="color:var(--text)">${t.coin}</td>
+      <td class="${typeClass}">${t.type}</td>
+      <td style="color:var(--text)">${fmt(t.price)} ฿</td>
+      <td>${pnlHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  document.getElementById('status-dot').className = 'status-dot';
+
+  // BTC
+  const [btcT, btcC] = await Promise.all([fetchTicker('THB_BTC'), fetchCandles('THB_BTC','60',50)]);
+  if (btcT.last) {
+    document.getElementById('btc-price').textContent  = fmt(btcT.last) + ' ฿';
+    document.getElementById('btc-high').textContent   = fmt(btcT.high24hr||0);
+    document.getElementById('btc-low').textContent    = fmt(btcT.low24hr||0);
+    document.getElementById('btc-vol').textContent    = fmt(btcT.baseVolume||0,2);
+    const chg = parseFloat(btcT.percentChange||0);
+    const chgEl = document.getElementById('btc-change');
+    chgEl.textContent = (chg>=0?'▲ +':'▼ ') + chg.toFixed(2) + '%  (24H)';
+    chgEl.className   = 'coin-change ' + (chg>=0?'up':'down');
+  }
+  if (btcC.length) updateRsiCard('btc', calcRsi(btcC));
+
+  // ETH
+  const [ethT, ethC] = await Promise.all([fetchTicker('THB_ETH'), fetchCandles('THB_ETH','60',50)]);
+  if (ethT.last) {
+    document.getElementById('eth-price').textContent  = fmt(ethT.last) + ' ฿';
+    document.getElementById('eth-high').textContent   = fmt(ethT.high24hr||0);
+    document.getElementById('eth-low').textContent    = fmt(ethT.low24hr||0);
+    document.getElementById('eth-vol').textContent    = fmt(ethT.baseVolume||0,2);
+    const chg = parseFloat(ethT.percentChange||0);
+    const chgEl = document.getElementById('eth-change');
+    chgEl.textContent = (chg>=0?'▲ +':'▼ ') + chg.toFixed(2) + '%  (24H)';
+    chgEl.className   = 'coin-change ' + (chg>=0?'up':'down');
+  }
+  if (ethC.length) updateRsiCard('eth', calcRsi(ethC));
+
+  // Regime (ใช้ BTC 1H)
+  if (btcC.length) renderRegime(btcC);
+
+  // Trades
+  renderTrades();
+
+  document.getElementById('footer').textContent =
+    `LAST UPDATE: ${new Date().toLocaleString('th-TH')}  —  AUTO REFRESH ทุก 60 วินาที`;
+}
+
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>
+
+<script>
+// ดึงข้อมูลจาก Bot Server จริงๆ
+async function fetchBotState() {
+  try {
+    const r = await fetch('/api/state');
+    const d = await r.json();
+
+    // Regime
+    const badge = document.getElementById('regime-badge');
+    badge.textContent = d.regime;
+    badge.className = `regime-badge regime-${d.regime.toLowerCase()}`;
+
+    // Strategy
+    document.getElementById('stat-strat').textContent = d.strategy || '—';
+
+    // PnL
+    const pnlEl = document.getElementById('stat-pnl');
+    pnlEl.textContent = (d.total_pnl >= 0 ? '+' : '') + d.total_pnl.toFixed(2) + ' ฿';
+    pnlEl.className   = 'stat-value ' + (d.total_pnl >= 0 ? 'green' : 'red');
+
+    // Trades + WR
+    document.getElementById('stat-trades').textContent = d.trade_count;
+    const wr = d.trade_count > 0 ? (d.win_count / d.trade_count * 100).toFixed(0) + '%' : '—';
+    document.getElementById('stat-wr').textContent = wr;
+
+    // Regime details
+    if (d.regime_details) {
+      const rd = d.regime_details;
+      document.getElementById('ri-adx').textContent = rd.adx || '—';
+      document.getElementById('ri-adx').style.color = rd.adx_ok ? 'var(--green)' : 'var(--red)';
+      document.getElementById('ri-bb').textContent  = rd.bb  || '—';
+      document.getElementById('ri-bb').style.color  = rd.bb_ok  ? 'var(--green)' : 'var(--red)';
+      document.getElementById('ri-wr').textContent  = rd.wr  || '—';
+      document.getElementById('ri-wr').style.color  = rd.wr_ok  ? 'var(--green)' : 'var(--red)';
+    }
+
+    // Positions
+    const posList = document.getElementById('positions-list');
+    const posEntries = Object.entries(d.positions || {}).filter(([,p]) => p.entry_price);
+    if (posEntries.length === 0) {
+      posList.innerHTML = '<div class="no-pos">ไม่มี position ที่เปิดอยู่</div>';
+    } else {
+      posList.innerHTML = posEntries.map(([coin, p]) => `
+        <div class="pos-item">
+          <div class="pos-left">
+            <span class="pos-coin">${coin}</span>
+            <span class="pos-entry">ซื้อที่ ${p.entry_price.toLocaleString('th-TH', {maximumFractionDigits:0})} ฿</span>
+          </div>
+          <div class="pos-right">
+            <span class="pos-entry">Peak: ${(p.peak_price||0).toLocaleString('th-TH', {maximumFractionDigits:0})} ฿</span>
+          </div>
+        </div>`).join('');
+    }
+
+    // Status dot
+    document.getElementById('status-dot').className = d.is_paused ? 'status-dot offline' : 'status-dot';
+
+  } catch(e) {
+    // ถ้าดึงไม่ได้ (เปิดเป็นไฟล์) ก็ใช้ข้อมูลจาก Bitkub API แทน
+  }
+}
+
+// เรียกทุกครั้งที่ refresh
+const origRefresh = window.refresh;
+window.refresh = async function() {
+  await Promise.all([origRefresh ? origRefresh() : Promise.resolve(), fetchBotState()]);
+};
+fetchBotState();
+setInterval(fetchBotState, 30000);
+</script>
