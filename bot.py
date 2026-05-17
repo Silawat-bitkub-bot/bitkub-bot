@@ -23,8 +23,8 @@ BASE_URL         = "https://api.bitkub.com"
 
 # ========== ตั้งค่าหลัก ==========
 COINS = [
-    {"symbol": "THB_BTC", "name": "BTC", "min_order": 50, "reserve": 0.0},
-    {"symbol": "THB_ETH", "name": "ETH", "min_order": 50, "reserve": 0.0},
+    {"symbol": "THB_BTC", "name": "BTC", "min_order": 50, "reserve": 0.000579},
+    {"symbol": "THB_ETH", "name": "ETH", "min_order": 50, "reserve": 0.098222},
 ]
 POSITION_PCT      = 0.10        # 10% ต่อเหรียญ (BTC+ETH = 20% รวม)
 STOP_LOSS_PCT     = 0.05
