@@ -499,7 +499,8 @@ def run_weekly_backtest(manual=False):
                     if (price-entry)/entry >= 0.05:
                         pnl = (price-entry)/entry*(coin_bal*entry)
                         thb += coin_bal*price*0.9975; coin_bal = 0; entry = None
-                        trades.append(pnl); if pnl > 0: wins += 1
+                        trades.append(pnl)
+                        if pnl > 0: wins += 1
                         prev_sig = "sell"; continue
 
                 sig = "buy" if rsi < RSI_OVERSOLD else "sell" if rsi > RSI_OVERBOUGHT else "hold"
@@ -512,7 +513,8 @@ def run_weekly_backtest(manual=False):
                 elif sig == "sell" and prev_sig != "sell" and coin_bal > 0:
                     pnl = (price-entry)/entry*(coin_bal*entry) if entry else 0
                     thb += coin_bal*price*0.9975; coin_bal = 0; entry = None
-                    trades.append(pnl); if pnl > 0: wins += 1
+                    trades.append(pnl)
+                    if pnl > 0: wins += 1
                     prev_sig = "sell"
 
             if coin_bal > 0: thb += coin_bal*closes[-1]*0.9975
