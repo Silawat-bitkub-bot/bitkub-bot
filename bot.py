@@ -768,6 +768,16 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(DASHBOARD_HTML.encode())
 
 
+
+def keep_alive():
+    import urllib.request
+    url = os.getenv('RENDER_EXTERNAL_URL', '')
+    if not url: return
+    while True:
+        try: urllib.request.urlopen(f'{url}/api/state', timeout=10)
+        except: pass
+        time.sleep(600)
+
 def start_dashboard():
     port = int(os.getenv("PORT", 8080))
     with socketserver.TCPServer(("", port), DashboardHandler) as httpd:
@@ -779,4 +789,5 @@ if __name__ == "__main__":
     if not API_KEY or not API_SECRET:
         print("❌ ไม่พบ API Key!"); exit(1)
     threading.Thread(target=start_dashboard, daemon=True).start()
+    threading.Thread(target=keep_alive, daemon=True).start()
     run_bot()
