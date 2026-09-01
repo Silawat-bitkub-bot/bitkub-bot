@@ -375,6 +375,26 @@ def calc_adx(highs, lows, closes, period=14):
     return round(sum(dx_l[-period:])/period, 2) if len(dx_l) >= period else None
 
 
+
+def calc_dynamic_rsi_threshold(symbol, lookback=720, buy_pct=0.15, sell_pct=0.85):
+    """คำนวณ RSI threshold จากข้อมูลย้อนหลัง 30 วัน"""
+    try:
+        _, _, closes = get_candles(symbol, RSI_RESOLUTION, lookback)
+        if len(closes) < 50: return RSI_OVERSOLD, RSI_OVERBOUGHT
+        rsi_list = []
+        for i in range(RSI_PERIOD+5, len(closes)):
+            r = calc_rsi(closes[:i+1], RSI_PERIOD)
+            if r: rsi_list.append(r)
+        if len(rsi_list) < 20: return RSI_OVERSOLD, RSI_OVERBOUGHT
+        rsi_list.sort()
+        buy  = round(rsi_list[int(len(rsi_list)*buy_pct)], 1)
+        sell = round(rsi_list[int(len(rsi_list)*sell_pct)], 1)
+        buy  = max(25, min(buy, 40))   # จำกัดไม่ให้เกินเหตุ
+        sell = min(75, max(sell, 60))
+        return buy, sell
+    except:
+        return RSI_OVERSOLD, RSI_OVERBOUGHT
+
 def calc_bb_width(closes, period=20):
     if len(closes) < period: return None
     sl   = closes[-period:]; mean = sum(sl)/period
@@ -608,7 +628,9 @@ def process_coin(c):
 
     # เลือก strategy
     if current_strategy == "RSI":
-        signal, reason, rsi = strategy_rsi(closes_1h)
+        dyn_buy, dyn_sell = calc_dynamic_rsi_threshold(p["symbol"])
+        signal, reason, rsi = strategy_rsi(closes_1h, dyn_buy, dyn_sell)
+        log(f"  {coin_name}: Dynamic RSI Buy<{dyn_buy} Sell>{dyn_sell}")
 
         # RSI Alert — แจ้งเตือนก่อนถึงจุดซื้อ
         if rsi and RSI_OVERSOLD < rsi <= RSI_ALERT and not p["entry_price"]:
